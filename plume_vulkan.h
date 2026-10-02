@@ -292,7 +292,9 @@ namespace plume {
         std::vector<uint64_t> results;
         VkQueryPool vk = VK_NULL_HANDLE;
 
-        VulkanQueryPool(VulkanDevice *device, uint32_t queryCount);
+        bool fragmentCounts = false;
+
+        VulkanQueryPool(VulkanDevice *device, uint32_t queryCount, bool fragmentCounts = false);
         virtual ~VulkanQueryPool() override;
         virtual void queryResults() override;
         virtual const uint64_t *getResults() const override;
@@ -338,6 +340,8 @@ namespace plume {
         void setScissors(const RenderRect *scissorRects, uint32_t count) override;
         void setFramebuffer(const RenderFramebuffer *framebuffer) override;
         void setRenderArea(const RenderRect *area) override;
+        void beginQuery(const RenderQueryPool *queryPool, uint32_t queryIndex) override;
+        void endQuery(const RenderQueryPool *queryPool, uint32_t queryIndex) override;
         void setDepthBias(float depthBias, float depthBiasClamp, float slopeScaledDepthBias) override;
         void clearColor(uint32_t attachmentIndex, RenderColor colorValue, const RenderRect *clearRects, uint32_t clearRectsCount) override;
         void clearDepthStencil(bool clearDepth, bool clearStencil, float depthValue, uint32_t stencilValue, const RenderRect *clearRects, uint32_t clearRectsCount) override;
@@ -417,6 +421,7 @@ namespace plume {
         VkDevice vk = VK_NULL_HANDLE;
         VulkanInterface *renderInterface = nullptr;
         VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+        bool pipelineStatisticsQuery = false;
         VkPhysicalDeviceProperties physicalDeviceProperties = {};
         VmaAllocator allocator = VK_NULL_HANDLE;
         uint32_t queueFamilyIndices[3] = {};
@@ -447,6 +452,7 @@ namespace plume {
         std::unique_ptr<RenderCommandSemaphore> createCommandSemaphore() override;
         std::unique_ptr<RenderFramebuffer> createFramebuffer(const RenderFramebufferDesc &desc) override;
         std::unique_ptr<RenderQueryPool> createQueryPool(uint32_t queryCount) override;
+        std::unique_ptr<RenderQueryPool> createFragmentCountQueryPool(uint32_t queryCount) override;
         void setBottomLevelASBuildInfo(RenderBottomLevelASBuildInfo &buildInfo, const RenderBottomLevelASMesh *meshes, uint32_t meshCount, bool preferFastBuild, bool preferFastTrace) override;
         void setTopLevelASBuildInfo(RenderTopLevelASBuildInfo &buildInfo, const RenderTopLevelASInstance *instances, uint32_t instanceCount, bool preferFastBuild, bool preferFastTrace) override;
         void setShaderBindingTableInfo(RenderShaderBindingTableInfo &tableInfo, const RenderShaderBindingGroups &groups, const RenderPipeline *pipeline, RenderDescriptorSet **descriptorSets, uint32_t descriptorSetCount) override;

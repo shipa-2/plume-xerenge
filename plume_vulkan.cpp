@@ -2758,15 +2758,19 @@ namespace plume {
 
     // VulkanQueryPool
 
-    VulkanQueryPool::VulkanQueryPool(VulkanDevice *device, uint32_t queryCount) {
+    VulkanQueryPool::VulkanQueryPool(VulkanDevice *device, uint32_t queryCount, bool fragmentCounts) {
         assert(device != nullptr);
         assert(queryCount > 0);
 
         this->device = device;
+        this->fragmentCounts = fragmentCounts;
 
         VkQueryPoolCreateInfo createInfo = {};
         createInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-        createInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        createInfo.queryType = fragmentCounts ? VK_QUERY_TYPE_PIPELINE_STATISTICS : VK_QUERY_TYPE_TIMESTAMP;
+        if (fragmentCounts) {
+            createInfo.pipelineStatistics = VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT;
+        }
         createInfo.queryCount = queryCount;
         
         VkResult res = vkCreateQueryPool(device->vk, &createInfo, nullptr, &vk);
@@ -2783,6 +2787,12 @@ namespace plume {
     }
 
     void VulkanQueryPool::queryResults() {
+        if (fragmentCounts) {
+            // Counts as they are; a query not written (yet) leaves its slot alone.
+            vkGetQueryPoolResults(device->vk, vk, 0, uint32_t(results.size()), sizeof(uint64_t) * results.size(), results.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+            return;
+        }
+
 	    VkResult res = vkGetQueryPoolResults(device->vk, vk, 0, uint32_t(results.size()), sizeof(uint64_t) * results.size(), results.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
         if (res != VK_SUCCESS) {
             fprintf(stderr, "vkGetQueryPoolResults failed with error code 0x%X.\n", res);
@@ -3630,6 +3640,26 @@ namespace plume {
         vkCmdResetQueryPool(vk, interfaceQueryPool->vk, queryFirstIndex, queryCount);
     }
 
+    void VulkanCommandList::beginQuery(const RenderQueryPool *queryPool, uint32_t queryIndex) {
+        assert(queryPool != nullptr);
+
+        // Around a draw the query has to begin inside the render pass the draw
+        // opens, which is opened lazily: open it now.
+        if (targetFramebuffer != nullptr) {
+            checkActiveRenderPass();
+        }
+
+        const VulkanQueryPool *interfaceQueryPool = static_cast<const VulkanQueryPool *>(queryPool);
+        vkCmdBeginQuery(vk, interfaceQueryPool->vk, queryIndex, 0);
+    }
+
+    void VulkanCommandList::endQuery(const RenderQueryPool *queryPool, uint32_t queryIndex) {
+        assert(queryPool != nullptr);
+
+        const VulkanQueryPool *interfaceQueryPool = static_cast<const VulkanQueryPool *>(queryPool);
+        vkCmdEndQuery(vk, interfaceQueryPool->vk, queryIndex);
+    }
+
     void VulkanCommandList::writeTimestamp(const RenderQueryPool *queryPool, uint32_t queryIndex) {
         assert(queryPool != nullptr);
 
@@ -4223,6 +4253,7 @@ namespace plume {
         createInfo.ppEnabledExtensionNames = enabledExtensions.data();
         createInfo.enabledExtensionCount = uint32_t(enabledExtensions.size());
         createInfo.pEnabledFeatures = &deviceFeatures.features;
+        pipelineStatisticsQuery = deviceFeatures.features.pipelineStatisticsQuery;
 
         VkResult res = vkCreateDevice(physicalDevice, &createInfo, nullptr, &vk);
         if (res != VK_SUCCESS) {
@@ -4413,6 +4444,19 @@ namespace plume {
 
     std::unique_ptr<RenderQueryPool> VulkanDevice::createQueryPool(uint32_t queryCount) {
         return std::make_unique<VulkanQueryPool>(this, queryCount);
+    }
+
+    std::unique_ptr<RenderQueryPool> VulkanDevice::createFragmentCountQueryPool(uint32_t queryCount) {
+        if (!pipelineStatisticsQuery) {
+            return nullptr;
+        }
+
+        auto pool = std::make_unique<VulkanQueryPool>(this, queryCount, true);
+        if (pool->vk == VK_NULL_HANDLE) {
+            return nullptr;
+        }
+
+        return pool;
     }
 
     void VulkanDevice::setBottomLevelASBuildInfo(RenderBottomLevelASBuildInfo &buildInfo, const RenderBottomLevelASMesh *meshes, uint32_t meshCount, bool preferFastBuild, bool preferFastTrace) {

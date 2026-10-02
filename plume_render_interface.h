@@ -148,6 +148,9 @@ namespace plume {
         // that pass has to lie inside it. On a tiled GPU only that part is loaded
         // and stored. Backends without the notion ignore it.
         virtual void setRenderArea(const RenderRect *area) { (void)area; }
+        // A query of a pool from createFragmentCountQueryPool around draws (none by default).
+        virtual void beginQuery(const RenderQueryPool *queryPool, uint32_t queryIndex) { (void)queryPool; (void)queryIndex; }
+        virtual void endQuery(const RenderQueryPool *queryPool, uint32_t queryIndex) { (void)queryPool; (void)queryIndex; }
         virtual void setDepthBias(float depthBias, float depthBiasClamp, float slopeScaledDepthBias) = 0;
         virtual void clearColor(uint32_t attachmentIndex = 0, RenderColor colorValue = RenderColor(), const RenderRect *clearRects = nullptr, uint32_t clearRectsCount = 0) = 0;
         virtual void clearDepthStencil(bool clearDepth = true, bool clearStencil = true, float depthValue = 1.0f, uint32_t stencilValue = 0, const RenderRect *clearRects = nullptr, uint32_t clearRectsCount = 0) = 0;
@@ -257,6 +260,9 @@ namespace plume {
         virtual std::unique_ptr<RenderCommandSemaphore> createCommandSemaphore() = 0;
         virtual std::unique_ptr<RenderFramebuffer> createFramebuffer(const RenderFramebufferDesc &desc) = 0;
         virtual std::unique_ptr<RenderQueryPool> createQueryPool(uint32_t queryCount) = 0;
+        // Queries that count fragment shader invocations (pipeline statistics); results are counts,
+        // not times. Null where the backend or device has none.
+        virtual std::unique_ptr<RenderQueryPool> createFragmentCountQueryPool(uint32_t queryCount) { (void)queryCount; return nullptr; }
         virtual void setBottomLevelASBuildInfo(RenderBottomLevelASBuildInfo &buildInfo, const RenderBottomLevelASMesh *meshes, uint32_t meshCount, bool preferFastBuild = true, bool preferFastTrace = false) = 0;
         virtual void setTopLevelASBuildInfo(RenderTopLevelASBuildInfo &buildInfo, const RenderTopLevelASInstance *instances, uint32_t instanceCount, bool preferFastBuild = true, bool preferFastTrace = false) = 0;
         virtual void setShaderBindingTableInfo(RenderShaderBindingTableInfo &tableInfo, const RenderShaderBindingGroups &groups, const RenderPipeline *pipeline, RenderDescriptorSet **descriptorSets, uint32_t descriptorSetCount) = 0;
