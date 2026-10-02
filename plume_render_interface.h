@@ -143,6 +143,11 @@ namespace plume {
         virtual void setViewports(const RenderViewport *viewports, uint32_t count) = 0;
         virtual void setScissors(const RenderRect *scissorRects, uint32_t count) = 0;
         virtual void setFramebuffer(const RenderFramebuffer *framebuffer) = 0;
+        // The part of the framebuffer the next render pass covers (nullptr: all of
+        // it), until the framebuffer is set again. Everything drawn or cleared in
+        // that pass has to lie inside it. On a tiled GPU only that part is loaded
+        // and stored. Backends without the notion ignore it.
+        virtual void setRenderArea(const RenderRect *area) { (void)area; }
         virtual void setDepthBias(float depthBias, float depthBiasClamp, float slopeScaledDepthBias) = 0;
         virtual void clearColor(uint32_t attachmentIndex = 0, RenderColor colorValue = RenderColor(), const RenderRect *clearRects = nullptr, uint32_t clearRectsCount = 0) = 0;
         virtual void clearDepthStencil(bool clearDepth = true, bool clearStencil = true, float depthValue = 1.0f, uint32_t stencilValue = 0, const RenderRect *clearRects = nullptr, uint32_t clearRectsCount = 0) = 0;

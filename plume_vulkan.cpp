@@ -3184,8 +3184,31 @@ namespace plume {
         }
     }
 
+    void VulkanCommandList::setRenderArea(const RenderRect *area) {
+        targetHasRenderArea = false;
+        if (area == nullptr || targetFramebuffer == nullptr) {
+            return;
+        }
+        // Clamped to the framebuffer; the whole of it is the ordinary pass.
+        const int32_t left = std::max(area->left, 0);
+        const int32_t top = std::max(area->top, 0);
+        const int32_t right = std::min(area->right, int32_t(targetFramebuffer->width));
+        const int32_t bottom = std::min(area->bottom, int32_t(targetFramebuffer->height));
+        if (right <= left || bottom <= top) {
+            return;
+        }
+        if (left == 0 && top == 0 && right == int32_t(targetFramebuffer->width) &&
+            bottom == int32_t(targetFramebuffer->height)) {
+            return;
+        }
+        targetRenderArea.offset = { left, top };
+        targetRenderArea.extent = { uint32_t(right - left), uint32_t(bottom - top) };
+        targetHasRenderArea = true;
+    }
+
     void VulkanCommandList::setFramebuffer(const RenderFramebuffer *framebuffer) {
         endActiveRenderPass();
+        targetHasRenderArea = false;
 
         if (framebuffer != nullptr) {
             const VulkanFramebuffer *interfaceFramebuffer = static_cast<const VulkanFramebuffer *>(framebuffer);
@@ -3624,6 +3647,9 @@ namespace plume {
             beginInfo.framebuffer = targetFramebuffer->vk;
             beginInfo.renderArea.extent.width = targetFramebuffer->width;
             beginInfo.renderArea.extent.height = targetFramebuffer->height;
+            if (targetHasRenderArea) {
+                beginInfo.renderArea = targetRenderArea;
+            }
             vkCmdBeginRenderPass(vk, &beginInfo, VkSubpassContents::VK_SUBPASS_CONTENTS_INLINE);
             activeRenderPass = targetFramebuffer->renderPass;
         }

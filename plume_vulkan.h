@@ -304,6 +304,8 @@ namespace plume {
         VkCommandPool commandPool = VK_NULL_HANDLE;
         VulkanCommandQueue *queue = nullptr;
         const VulkanFramebuffer *targetFramebuffer = nullptr;
+        bool targetHasRenderArea = false;
+        VkRect2D targetRenderArea = {};
         const VulkanPipelineLayout *activeComputePipelineLayout = nullptr;
         const VulkanPipelineLayout *activeGraphicsPipelineLayout = nullptr;
         const VulkanPipelineLayout *activeRaytracingPipelineLayout = nullptr;
@@ -335,6 +337,7 @@ namespace plume {
         void setViewports(const RenderViewport *viewports, uint32_t count) override;
         void setScissors(const RenderRect *scissorRects, uint32_t count) override;
         void setFramebuffer(const RenderFramebuffer *framebuffer) override;
+        void setRenderArea(const RenderRect *area) override;
         void setDepthBias(float depthBias, float depthBiasClamp, float slopeScaledDepthBias) override;
         void clearColor(uint32_t attachmentIndex, RenderColor colorValue, const RenderRect *clearRects, uint32_t clearRectsCount) override;
         void clearDepthStencil(bool clearDepth, bool clearStencil, float depthValue, uint32_t stencilValue, const RenderRect *clearRects, uint32_t clearRectsCount) override;
