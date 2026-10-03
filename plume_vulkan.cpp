@@ -98,6 +98,11 @@ namespace plume {
 
     // Common functions.
 
+    static bool PoisonUnloaded() {
+        static const bool poison = getenv("PLUME_POISON_UNLOADED") != nullptr;
+        return poison;
+    }
+
     static uint32_t roundUp(uint32_t value, uint32_t powerOf2Alignment) {
         return (value + powerOf2Alignment - 1) & ~(powerOf2Alignment - 1);
     }
@@ -2384,6 +2389,14 @@ namespace plume {
 
     bool VulkanSwapChain::resize() {
         getWindowSize(width, height);
+#   if defined(__ANDROID__)
+        // The system scales the images onto the window (the Android swap chain
+        // asks for SCALE_TO_WINDOW), so they can be the frame's own size.
+        if ((width != 0) && (height != 0) && (fixedWidth != 0) && (fixedHeight != 0)) {
+            width = fixedWidth;
+            height = fixedHeight;
+        }
+#   endif
 
         // Don't recreate the swap chain at all if the window doesn't have a valid size.
         if ((width == 0) || (height == 0)) {
@@ -2476,6 +2489,12 @@ namespace plume {
     bool VulkanSwapChain::needsResize() const {
         uint32_t windowWidth, windowHeight;
         getWindowSize(windowWidth, windowHeight);
+#   if defined(__ANDROID__)
+        if ((windowWidth != 0) && (windowHeight != 0) && (fixedWidth != 0) && (fixedHeight != 0)) {
+            windowWidth = fixedWidth;
+            windowHeight = fixedHeight;
+        }
+#   endif
         return (vk == VK_NULL_HANDLE) || (windowWidth != width) || (windowHeight != height) || (requiredPresentMode != createdPresentMode);
     }
 
@@ -2499,6 +2518,11 @@ namespace plume {
 
     bool VulkanSwapChain::isVsyncEnabled() const {
         return (createdPresentMode == VK_PRESENT_MODE_FIFO_KHR) || (createdPresentMode == VK_PRESENT_MODE_MAILBOX_KHR);
+    }
+
+    void VulkanSwapChain::setFixedSize(uint32_t width, uint32_t height) {
+        fixedWidth = width;
+        fixedHeight = height;
     }
 
     uint32_t VulkanSwapChain::getWidth() const {
@@ -2709,6 +2733,12 @@ namespace plume {
             fprintf(stderr, "vkCreateRenderPass failed with error code 0x%X.\n", res);
             return;
         }
+
+        // Kept for the variants of the pass (renderPassFor).
+        attachmentDescriptions = attachments;
+        colorAttachmentReferences = colorReferences;
+        depthAttachmentReference = depthReference;
+        hasDepthAttachment = subpass.pDepthStencilAttachment != nullptr;
         
         VkFramebufferCreateInfo fbInfo = {};
         fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -2734,6 +2764,72 @@ namespace plume {
         if (renderPass != VK_NULL_HANDLE) {
             vkDestroyRenderPass(device->vk, renderPass, nullptr);
         }
+
+        for (const auto &variant : renderPassVariants) {
+            vkDestroyRenderPass(device->vk, variant.second, nullptr);
+        }
+    }
+
+    // The same attachments, some not loaded or not stored: compatible with the
+    // framebuffer and with every pipeline made for the ordinary pass, since only
+    // formats and sample counts decide that.
+    VkRenderPass VulkanFramebuffer::renderPassFor(uint32_t noLoadMask, uint32_t discardMask) const {
+        if (((noLoadMask | discardMask) == 0) || (renderPass == VK_NULL_HANDLE)) {
+            return renderPass;
+        }
+
+        const uint64_t key = (uint64_t(noLoadMask) << 32) | discardMask;
+        std::lock_guard<std::mutex> lock(renderPassVariantsMutex);
+        for (const auto &variant : renderPassVariants) {
+            if (variant.first == key) {
+                return variant.second;
+            }
+        }
+
+        // PLUME_POISON_UNLOADED: what is not loaded is cleared to a colour nothing
+        // draws (and depth to the near plane), so an attachment wrongly left
+        // unloaded shows on any GPU, not only on a tiled one.
+        const VkAttachmentLoadOp unloaded = PoisonUnloaded() ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        std::vector<VkAttachmentDescription> attachments = attachmentDescriptions;
+        const uint32_t colorCount = uint32_t(colorAttachmentReferences.size());
+        for (uint32_t i = 0; i < uint32_t(attachments.size()); i++) {
+            const bool depth = hasDepthAttachment && (i == depthAttachmentReference.attachment);
+            const uint32_t bit = depth ? RenderDepthAttachmentBit : (i < colorCount ? (1u << i) : 0u);
+            VkAttachmentDescription &attachment = attachments[i];
+            if (noLoadMask & bit) {
+                attachment.loadOp = unloaded;
+                if (depth) {
+                    attachment.stencilLoadOp = unloaded;
+                }
+            }
+            if (discardMask & bit) {
+                attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                if (depth) {
+                    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                }
+            }
+        }
+
+        VkSubpassDescription subpass = {};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.pColorAttachments = !colorAttachmentReferences.empty() ? colorAttachmentReferences.data() : nullptr;
+        subpass.colorAttachmentCount = colorCount;
+        subpass.pDepthStencilAttachment = hasDepthAttachment ? &depthAttachmentReference : nullptr;
+
+        VkRenderPassCreateInfo passInfo = {};
+        passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        passInfo.pAttachments = !attachments.empty() ? attachments.data() : nullptr;
+        passInfo.attachmentCount = uint32_t(attachments.size());
+        passInfo.pSubpasses = &subpass;
+        passInfo.subpassCount = 1;
+
+        VkRenderPass variant = VK_NULL_HANDLE;
+        if (vkCreateRenderPass(device->vk, &passInfo, nullptr, &variant) != VK_SUCCESS) {
+            return renderPass;
+        }
+
+        renderPassVariants.emplace_back(key, variant);
+        return variant;
     }
 
     uint32_t VulkanFramebuffer::getWidth() const {
@@ -2918,7 +3014,7 @@ namespace plume {
             return;
         }
 
-        endActiveRenderPass();
+        endActiveRenderPassImplicitly();
 
         const bool geometryEnabled = queue->device->capabilities.geometryShader;
         const bool rtEnabled = queue->device->capabilities.raytracing;
@@ -3216,9 +3312,16 @@ namespace plume {
         targetHasRenderArea = true;
     }
 
+    void VulkanCommandList::setAttachmentAccess(uint32_t noLoadMask, uint32_t discardMask) {
+        targetNoLoadMask = noLoadMask;
+        targetDiscardMask = discardMask;
+    }
+
     void VulkanCommandList::setFramebuffer(const RenderFramebuffer *framebuffer) {
         endActiveRenderPass();
         targetHasRenderArea = false;
+        targetNoLoadMask = 0;
+        targetDiscardMask = 0;
 
         if (framebuffer != nullptr) {
             const VulkanFramebuffer *interfaceFramebuffer = static_cast<const VulkanFramebuffer *>(framebuffer);
@@ -3305,7 +3408,7 @@ namespace plume {
     }
 
     void VulkanCommandList::copyBufferRegion(RenderBufferReference dstBuffer, RenderBufferReference srcBuffer, uint64_t size) {
-        endActiveRenderPass();
+        endActiveRenderPassImplicitly();
 
         assert(dstBuffer.ref != nullptr);
         assert(srcBuffer.ref != nullptr);
@@ -3320,7 +3423,7 @@ namespace plume {
     }
 
     void VulkanCommandList::copyTextureRegion(const RenderTextureCopyLocation &dstLocation, const RenderTextureCopyLocation &srcLocation, uint32_t dstX, uint32_t dstY, uint32_t dstZ, const RenderBox *srcBox) {
-        endActiveRenderPass();
+        endActiveRenderPassImplicitly();
         
         assert(dstLocation.type != RenderTextureCopyType::UNKNOWN);
         assert(srcLocation.type != RenderTextureCopyType::UNKNOWN);
@@ -3409,7 +3512,7 @@ namespace plume {
     }
 
     void VulkanCommandList::copyBuffer(const RenderBuffer *dstBuffer, const RenderBuffer *srcBuffer) {
-        endActiveRenderPass();
+        endActiveRenderPassImplicitly();
 
         assert(dstBuffer != nullptr);
         assert(srcBuffer != nullptr);
@@ -3424,7 +3527,7 @@ namespace plume {
     }
 
     void VulkanCommandList::copyTexture(const RenderTexture *dstTexture, const RenderTexture *srcTexture) {
-        endActiveRenderPass();
+        endActiveRenderPassImplicitly();
 
         assert(dstTexture != nullptr);
         assert(srcTexture != nullptr);
@@ -3460,7 +3563,7 @@ namespace plume {
     }
 
     bool VulkanCommandList::blitTexture(const RenderTexture *dstTexture, const RenderTexture *srcTexture, bool linearFilter, const RenderRect *dstRect) {
-        endActiveRenderPass();
+        endActiveRenderPassImplicitly();
 
         assert(dstTexture != nullptr);
         assert(srcTexture != nullptr);
@@ -3673,7 +3776,25 @@ namespace plume {
         if (activeRenderPass == VK_NULL_HANDLE) {
             VkRenderPassBeginInfo beginInfo = {};
             beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-            beginInfo.renderPass = targetFramebuffer->renderPass;
+            uint32_t noLoadMask = targetNoLoadMask;
+            thread_local std::vector<VkClearValue> poisonValues;
+            if (PoisonUnloaded()) {
+                // What an earlier pass discarded is poison when loaded.
+                noLoadMask |= targetFramebuffer->poisonedMask;
+                targetFramebuffer->poisonedMask = targetDiscardMask | (targetHasRenderArea ? targetFramebuffer->poisonedMask & ~noLoadMask : 0u);
+                poisonValues.assign(targetFramebuffer->attachmentDescriptions.size(), VkClearValue{});
+                for (VkClearValue &value : poisonValues) {
+                    value.color.float32[0] = 1.0f;
+                    value.color.float32[2] = 1.0f;
+                    value.color.float32[3] = 1.0f;
+                }
+                if (targetFramebuffer->hasDepthAttachment) {
+                    poisonValues[targetFramebuffer->depthAttachmentReference.attachment].depthStencil = { 0.0f, 0 };
+                }
+                beginInfo.clearValueCount = uint32_t(poisonValues.size());
+                beginInfo.pClearValues = poisonValues.data();
+            }
+            beginInfo.renderPass = targetFramebuffer->renderPassFor(noLoadMask, targetDiscardMask);
             beginInfo.framebuffer = targetFramebuffer->vk;
             beginInfo.renderArea.extent.width = targetFramebuffer->width;
             beginInfo.renderArea.extent.height = targetFramebuffer->height;
@@ -3681,8 +3802,21 @@ namespace plume {
                 beginInfo.renderArea = targetRenderArea;
             }
             vkCmdBeginRenderPass(vk, &beginInfo, VkSubpassContents::VK_SUBPASS_CONTENTS_INLINE);
-            activeRenderPass = targetFramebuffer->renderPass;
+            ++renderPassBegins;
+            activeRenderPass = beginInfo.renderPass;
+            // Begun again after a barrier or a copy, the pass loads what this part
+            // stores; only what is never touched stays unloaded.
+            targetNoLoadMask &= targetDiscardMask;
         }
+    }
+
+    // A barrier or a copy inside a render pass ends it; the next draw begins it
+    // again (loading what the first part stored, on a tiled GPU).
+    void VulkanCommandList::endActiveRenderPassImplicitly() {
+        if (activeRenderPass != VK_NULL_HANDLE) {
+            ++implicitPassEnds;
+        }
+        endActiveRenderPass();
     }
 
     void VulkanCommandList::endActiveRenderPass() {

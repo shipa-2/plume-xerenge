@@ -12,6 +12,9 @@
 #include "plume_render_interface_types.h"
 
 namespace plume {
+    // The depth attachment in RenderCommandList::setAttachmentAccess's masks.
+    constexpr uint32_t RenderDepthAttachmentBit = 1u << 31;
+
     // Interfaces.
 
     struct RenderBufferFormattedView {
@@ -103,6 +106,11 @@ namespace plume {
 
         // Only valid if displayTiming is enabled in capabilities.
         virtual uint32_t getRefreshRate() const = 0;
+
+        // Images of this size rather than the window's, from the next resize on
+        // (0 x 0: the window's again). Only where the system scales them onto
+        // the window (Android); elsewhere the window's size stays.
+        virtual void setFixedSize(uint32_t width, uint32_t height) { (void)width; (void)height; }
     };
 
     struct RenderFramebuffer {
@@ -148,6 +156,14 @@ namespace plume {
         // that pass has to lie inside it. On a tiled GPU only that part is loaded
         // and stored. Backends without the notion ignore it.
         virtual void setRenderArea(const RenderRect *area) { (void)area; }
+        // How the next render pass treats its attachments, until the framebuffer is
+        // set again: bit i a colour attachment, RenderDepthAttachmentBit the depth
+        // one. Not loaded: what is there is not needed - cleared over before it is
+        // used, or never used again. Discarded: not needed after the pass, not
+        // stored. On a tiled GPU each saves the pass's area going through memory.
+        // The pass begun again after a barrier or a copy inside it loads what the
+        // first part stored, so a discarded attachment must not be touched at all.
+        virtual void setAttachmentAccess(uint32_t noLoadMask, uint32_t discardMask) { (void)noLoadMask; (void)discardMask; }
         // A query of a pool from createFragmentCountQueryPool around draws (none by default).
         virtual void beginQuery(const RenderQueryPool *queryPool, uint32_t queryIndex) { (void)queryPool; (void)queryIndex; }
         virtual void endQuery(const RenderQueryPool *queryPool, uint32_t queryIndex) { (void)queryPool; (void)queryIndex; }

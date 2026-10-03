@@ -263,6 +263,9 @@ namespace plume {
         RenderWindow getWindow() const override;
         bool isEmpty() const override;
         uint32_t getRefreshRate() const override;
+        void setFixedSize(uint32_t width, uint32_t height) override;
+        uint32_t fixedWidth = 0;
+        uint32_t fixedHeight = 0;
         void getWindowSize(uint32_t &dstWidth, uint32_t &dstHeight) const;
         void releaseSwapChain();
         void releaseImageViews();
@@ -279,12 +282,21 @@ namespace plume {
         bool depthAttachmentReadOnly = false;
         uint32_t width = 0;
         uint32_t height = 0;
+        std::vector<VkAttachmentDescription> attachmentDescriptions;
+        std::vector<VkAttachmentReference> colorAttachmentReferences;
+        VkAttachmentReference depthAttachmentReference = {};
+        bool hasDepthAttachment = false;
+        mutable std::mutex renderPassVariantsMutex;
+        mutable std::vector<std::pair<uint64_t, VkRenderPass>> renderPassVariants;
+        // PLUME_POISON_UNLOADED: the attachments a pass discarded.
+        mutable uint32_t poisonedMask = 0;
 
         VulkanFramebuffer(VulkanDevice *device, const RenderFramebufferDesc &desc);
         ~VulkanFramebuffer() override;
         uint32_t getWidth() const override;
         uint32_t getHeight() const override;
         bool contains(const VulkanTexture *attachment) const;
+        VkRenderPass renderPassFor(uint32_t noLoadMask, uint32_t discardMask) const;
     };
 
     struct VulkanQueryPool : RenderQueryPool {
@@ -308,6 +320,8 @@ namespace plume {
         const VulkanFramebuffer *targetFramebuffer = nullptr;
         bool targetHasRenderArea = false;
         VkRect2D targetRenderArea = {};
+        uint32_t targetNoLoadMask = 0;
+        uint32_t targetDiscardMask = 0;
         const VulkanPipelineLayout *activeComputePipelineLayout = nullptr;
         const VulkanPipelineLayout *activeGraphicsPipelineLayout = nullptr;
         const VulkanPipelineLayout *activeRaytracingPipelineLayout = nullptr;
@@ -340,6 +354,7 @@ namespace plume {
         void setScissors(const RenderRect *scissorRects, uint32_t count) override;
         void setFramebuffer(const RenderFramebuffer *framebuffer) override;
         void setRenderArea(const RenderRect *area) override;
+        void setAttachmentAccess(uint32_t noLoadMask, uint32_t discardMask) override;
         void beginQuery(const RenderQueryPool *queryPool, uint32_t queryIndex) override;
         void endQuery(const RenderQueryPool *queryPool, uint32_t queryIndex) override;
         void setDepthBias(float depthBias, float depthBiasClamp, float slopeScaledDepthBias) override;
@@ -359,6 +374,11 @@ namespace plume {
         void writeTimestamp(const RenderQueryPool *queryPool, uint32_t queryIndex) override;
         void checkActiveRenderPass();
         void endActiveRenderPass();
+        void endActiveRenderPassImplicitly();
+        // Counted for diagnostics: render passes begun, and ended by a barrier or
+        // a copy rather than by setFramebuffer.
+        uint32_t renderPassBegins = 0;
+        uint32_t implicitPassEnds = 0;
         void setDescriptorSet(VkPipelineBindPoint bindPoint, const VulkanPipelineLayout *pipelineLayout, const RenderDescriptorSet *descriptorSet, uint32_t setIndex);
     };
 
