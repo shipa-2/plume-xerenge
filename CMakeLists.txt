@@ -17,7 +17,7 @@ string(COMPARE EQUAL ${CMAKE_SYSTEM_NAME} "Linux" IS_LINUX)
 
 # Project options
 include(CMakeDependentOption)
-cmake_dependent_option(PLUME_SDL_VULKAN_ENABLED "Enable SDL Vulkan integration" OFF IS_LINUX OFF)
+cmake_dependent_option(PLUME_SDL_VULKAN_ENABLED "Enable SDL Vulkan integration" OFF "IS_LINUX OR APPLE" OFF)
 cmake_dependent_option(PLUME_D3D12_AGILITY_SDK_ENABLED "Enable D3D12 Agility SDK" OFF WIN32 OFF)
 cmake_dependent_option(PLUME_APPLE_RETINA_ENABLED "Enable Apple Retina display support" ON APPLE ON)
 option(PLUME_BUILD_EXAMPLES "Build example applications" OFF)
@@ -48,7 +48,12 @@ if(PLUME_D3D12_AGILITY_SDK_ENABLED)
 endif()
 
 # Print status messages
-message(STATUS "Plume - Building with backends: Vulkan=1 Metal=${APPLE} D3D12=${WIN32}")
+if(APPLE AND NOT PLUME_SDL_VULKAN_ENABLED)
+    set(PLUME_METAL_BACKEND 1)
+else()
+    set(PLUME_METAL_BACKEND 0)
+endif()
+message(STATUS "Plume - Building with backends: Vulkan=1 Metal=${PLUME_METAL_BACKEND} D3D12=${WIN32}")
 message(STATUS "Plume - SDL Vulkan integration: ${PLUME_SDL_VULKAN_ENABLED}")
 message(STATUS "Plume - D3D12 Agility SDK: ${PLUME_D3D12_AGILITY_SDK_ENABLED}")
 message(STATUS "Plume - Building examples: ${PLUME_BUILD_EXAMPLES}")
@@ -60,7 +65,14 @@ set(PLUME_SOURCES
 )
 
 # Platform-specific files
-if(APPLE)
+if(APPLE AND PLUME_SDL_VULKAN_ENABLED)
+    # Vulkan through MoltenVK on an SDL window: the Metal backend takes the
+    # Cocoa window/view pair as its RenderWindow, which this mode replaces.
+    list(APPEND PLUME_SOURCES
+        plume_apple.mm
+        plume_apple.h
+    )
+elseif(APPLE)
     list(APPEND PLUME_SOURCES
         plume_metal.cpp
         plume_metal.h
