@@ -1812,7 +1812,17 @@ namespace plume {
     }
 
     void D3D12QueryPool::queryResults() {
-        void *readbackData = readbackBuffer->map();
+        void *readbackData = (readbackBuffer != nullptr) ? readbackBuffer->map() : nullptr;
+        if (readbackData == nullptr) {
+            // Mapping fails once the device is lost: say why, once, and report zeros.
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                fprintf(stderr, "D3D12QueryPool: readback map failed; device removed reason 0x%lX.\n", device->d3d->GetDeviceRemovedReason());
+            }
+            std::fill(results.begin(), results.end(), 0);
+            return;
+        }
         memcpy(results.data(), readbackData, sizeof(uint64_t) * results.size());
         readbackBuffer->unmap();
 
@@ -2044,7 +2054,9 @@ namespace plume {
     }
 
     void D3D12CommandList::setPipeline(const RenderPipeline *pipeline) {
-        assert(pipeline != nullptr);
+        if (pipeline == nullptr) {
+            return;
+        }
 
         const D3D12Pipeline *interfacePipeline = static_cast<const D3D12Pipeline *>(pipeline);
         switch (interfacePipeline->type) {
@@ -2055,6 +2067,11 @@ namespace plume {
         }
         case D3D12Pipeline::Type::Graphics: {
             const D3D12GraphicsPipeline *graphicsPipeline = static_cast<const D3D12GraphicsPipeline *>(interfacePipeline);
+            // A pipeline whose state object could not be made: bound, it takes the
+            // device down. Left out, the draws after it keep the last one.
+            if (graphicsPipeline->d3d == nullptr) {
+                break;
+            }
             d3d->SetPipelineState(graphicsPipeline->d3d);
             activeGraphicsPipeline = graphicsPipeline;
             break;
@@ -3220,7 +3237,11 @@ namespace plume {
 
         psoDesc.InputLayout = { inputElements.data(), UINT(inputElements.size()) };
 
-        device->d3d->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&d3d));
+        HRESULT res = device->d3d->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&d3d));
+        if (FAILED(res)) {
+            fprintf(stderr, "CreateGraphicsPipelineState failed with error code 0x%lX.\n", res);
+            d3d = nullptr;
+        }
     }
 
     D3D12GraphicsPipeline::~D3D12GraphicsPipeline() {
@@ -4200,6 +4221,17 @@ namespace plume {
     D3D12Interface::D3D12Interface() {
         // Create DXGI Factory.
         UINT dxgiFactoryFlags = 0;
+
+        // PLUME_D3D12_DEBUG=1: the debug layer in a release build too, its
+        // messages to the debugger's output (no break on errors).
+        if (const char *debugLayer = getenv("PLUME_D3D12_DEBUG"); debugLayer != nullptr && debugLayer[0] == '1') {
+            ID3D12Debug *releaseDebug = nullptr;
+            if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&releaseDebug)))) {
+                releaseDebug->EnableDebugLayer();
+                releaseDebug->Release();
+                fprintf(stderr, "D3D12: debug layer on (PLUME_D3D12_DEBUG).\n");
+            }
+        }
 
 #   ifdef D3D12_DEBUG_LAYER_ENABLED
         ID3D12Debug1 *debugController;
