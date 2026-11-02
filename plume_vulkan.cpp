@@ -2141,7 +2141,9 @@ namespace plume {
         surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
         surfaceCreateInfo.hwnd = HWND(desc.renderWindow);
         surfaceCreateInfo.hinstance = GetModuleHandle(nullptr);
+#   ifndef PLUME_UWP
         fprintf(stderr, "Surface: HWND %p (%s)\n", (void *)(desc.renderWindow), IsWindow(HWND(desc.renderWindow)) ? "a window" : "not a window");
+#   endif
 
         VulkanInterface *renderInterface = commandQueue->device->renderInterface;
         res = vkCreateWin32SurfaceKHR(renderInterface->instance, &surfaceCreateInfo, nullptr, &surface);
@@ -2569,7 +2571,11 @@ namespace plume {
     }
 
     void VulkanSwapChain::getWindowSize(uint32_t &dstWidth, uint32_t &dstHeight) const {
-#   if defined(_WIN64)
+#   if defined(PLUME_UWP)
+        // No Vulkan on UWP; never reached.
+        dstWidth = 0;
+        dstHeight = 0;
+#   elif defined(_WIN64)
         RECT rect;
         GetClientRect(desc.renderWindow, &rect);
         dstWidth = rect.right - rect.left;

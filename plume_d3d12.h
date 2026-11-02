@@ -99,6 +99,11 @@ namespace plume {
         void setCBV(uint32_t descriptorIndex, ID3D12Resource *resource, uint64_t bufferSize);
     };
 
+#ifdef PLUME_UWP
+    // The CoreWindow's size in physical pixels, for its swap chains (UWP).
+    void D3D12SetCoreWindowSize(uint32_t width, uint32_t height);
+#endif
+
     struct D3D12SwapChain : RenderSwapChain {
         RenderSwapChainDesc desc;
         IDXGISwapChain3 *d3d = nullptr;

@@ -7,6 +7,8 @@
 
 #include "plume_d3d12.h"
 
+#include <atomic>
+
 #include <unordered_set>
 
 #include <dxgi1_5.h>
@@ -1354,6 +1356,15 @@ namespace plume {
 
         IDXGISwapChain1 *swapChain1;
         IDXGIFactory4 *dxgiFactory = commandQueue->device->renderInterface->dxgiFactory;
+#   ifdef PLUME_UWP
+        // UWP: the window is the CoreWindow (its IUnknown), stretched to the screen.
+        swapChainDesc.Scaling = DXGI_SCALING_STRETCH;
+        HRESULT res = dxgiFactory->CreateSwapChainForCoreWindow(commandQueue->d3d, reinterpret_cast<IUnknown *>(desc.renderWindow), &swapChainDesc, nullptr, &swapChain1);
+        if (FAILED(res)) {
+            fprintf(stderr, "CreateSwapChainForCoreWindow failed with error code 0x%lX.\n", res);
+            return;
+        }
+#   else
         HRESULT res = dxgiFactory->CreateSwapChainForHwnd(commandQueue->d3d, desc.renderWindow, &swapChainDesc, nullptr, nullptr, &swapChain1);
         if (FAILED(res)) {
             fprintf(stderr, "CreateSwapChainForHwnd failed with error code 0x%lX.\n", res);
@@ -1365,6 +1376,7 @@ namespace plume {
             fprintf(stderr, "MakeWindowAssociation failed with error code 0x%lX.\n", res);
             return;
         }
+#   endif
 
         d3d = static_cast<IDXGISwapChain3 *>(swapChain1);
         d3d->SetMaximumFrameLatency(desc.maxFrameLatency);
@@ -1460,11 +1472,28 @@ namespace plume {
         return height;
     }
 
+#ifdef PLUME_UWP
+    // A CoreWindow gives its size in view pixels; the app says what it is in
+    // physical ones.
+    static std::atomic<uint32_t> coreWindowWidth{1920};
+    static std::atomic<uint32_t> coreWindowHeight{1080};
+
+    void D3D12SetCoreWindowSize(uint32_t width, uint32_t height) {
+        coreWindowWidth = width;
+        coreWindowHeight = height;
+    }
+#endif
+
     void D3D12SwapChain::getWindowSize(uint32_t &dstWidth, uint32_t &dstHeight) const {
+#   ifdef PLUME_UWP
+        dstWidth = coreWindowWidth;
+        dstHeight = coreWindowHeight;
+#   else
         RECT rect;
         GetClientRect(desc.renderWindow, &rect);
         dstWidth = rect.right - rect.left;
         dstHeight = rect.bottom - rect.top;
+#   endif
     }
 
     void D3D12SwapChain::setTextures() {
