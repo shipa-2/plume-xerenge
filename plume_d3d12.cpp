@@ -1339,10 +1339,17 @@ namespace plume {
 
         getWindowSize(width, height);
 
+#ifdef PLUME_UWP
+        // Xbox One: sequential flip, no waitable object, no tearing. The
+        // waitable-object flag plus SetMaximumFrameLatency(0) left the
+        // picture off the display; tearing is not offered there either.
+        swapChainFlags = 0;
+#else
         swapChainFlags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
         if (commandQueue->device->renderInterface->allowTearing) {
             swapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
         }
+#endif
         
         DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
         swapChainDesc.BufferCount = desc.textureCount;
@@ -1378,9 +1385,19 @@ namespace plume {
         }
 #   endif
 
-        d3d = static_cast<IDXGISwapChain3 *>(swapChain1);
-        d3d->SetMaximumFrameLatency(desc.maxFrameLatency);
-        waitableObject = d3d->GetFrameLatencyWaitableObject();
+        res = swapChain1->QueryInterface(IID_PPV_ARGS(&d3d));
+        swapChain1->Release();
+        swapChain1 = nullptr;
+        if (FAILED(res) || d3d == nullptr) {
+            fprintf(stderr, "IDXGISwapChain3 QueryInterface failed with error code 0x%lX.\n", res);
+            return;
+        }
+        if (desc.maxFrameLatency > 0) {
+            d3d->SetMaximumFrameLatency(desc.maxFrameLatency);
+        }
+        waitableObject = (swapChainFlags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)
+                             ? d3d->GetFrameLatencyWaitableObject()
+                             : NULL;
 
         textures.resize(desc.textureCount);
 
@@ -1415,8 +1432,23 @@ namespace plume {
         const bool tearingAllowed = (swapChainFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0U;
         UINT syncInterval = (vsyncEnabled && !desc.enablePresentWait) ? 1 : 0;
         UINT flags = (!vsyncEnabled && tearingAllowed) ? DXGI_PRESENT_ALLOW_TEARING : 0;
+#ifdef PLUME_UWP
+        drawPresentSource();
+#endif
         HRESULT res = d3d->Present(syncInterval, flags);
-        return SUCCEEDED(res);
+        if (res == DXGI_ERROR_WAS_STILL_DRAWING) {
+            return true;
+        }
+        if (FAILED(res)) {
+            static UINT presentFails = 0;
+            if (presentFails < 8) {
+                fprintf(stderr, "Present failed with error code 0x%lX (sync %u flags %u)\n",
+                        res, syncInterval, flags);
+            }
+            ++presentFails;
+            return false;
+        }
+        return true;
     }
 
     void D3D12SwapChain::wait() {
@@ -1481,6 +1513,139 @@ namespace plume {
     void D3D12SetCoreWindowSize(uint32_t width, uint32_t height) {
         coreWindowWidth = width;
         coreWindowHeight = height;
+    }
+
+    // The present blit: raw D3D12, as the console takes it - a root signature
+    // of one SRV table and a static sampler, a pipeline of the given shaders,
+    // one shader-visible SRV and one RTV, and a list of its own on the queue.
+    static std::vector<uint8_t> presentVs;
+    static std::vector<uint8_t> presentPs;
+
+    void D3D12SetPresentShaders(const void *vs, size_t vsSize, const void *ps, size_t psSize) {
+        presentVs.assign(static_cast<const uint8_t *>(vs), static_cast<const uint8_t *>(vs) + vsSize);
+        presentPs.assign(static_cast<const uint8_t *>(ps), static_cast<const uint8_t *>(ps) + psSize);
+    }
+
+    void D3D12SetPresentSource(RenderSwapChain *swapChain, RenderTexture *source) {
+        auto *chain = static_cast<D3D12SwapChain *>(swapChain);
+        auto *texture = static_cast<D3D12Texture *>(source);
+        chain->presentSource = texture ? texture->d3d : nullptr;
+        chain->presentSourceFormat = texture ? toDXGI(texture->desc.format) : DXGI_FORMAT_UNKNOWN;
+    }
+
+    struct D3D12SwapChain::PresentBlit {
+        ID3D12RootSignature *rootSignature = nullptr;
+        ID3D12PipelineState *pipeline = nullptr;
+        ID3D12DescriptorHeap *srvHeap = nullptr;
+        ID3D12DescriptorHeap *rtvHeap = nullptr;
+        ID3D12CommandAllocator *allocator = nullptr;
+        ID3D12GraphicsCommandList *list = nullptr;
+        ID3D12Fence *fence = nullptr;
+        UINT64 fenceValue = 0;
+        bool failed = false;
+    };
+
+    bool D3D12SwapChain::drawPresentSource() {
+        ID3D12Device *device = commandQueue->device->d3d;
+        if (presentBlit == nullptr) {
+            presentBlit = new PresentBlit();
+            PresentBlit &b = *presentBlit;
+            b.failed = true;
+            D3D12_DESCRIPTOR_RANGE range = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
+            D3D12_ROOT_PARAMETER parameter = {};
+            parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            parameter.DescriptorTable = {1, &range};
+            parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_STATIC_SAMPLER_DESC sampler = {};
+            sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+            sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            sampler.MaxLOD = D3D12_FLOAT32_MAX;
+            sampler.ShaderRegister = 1;
+            sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_ROOT_SIGNATURE_DESC rootDesc = {1, &parameter, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+            ID3DBlob *blob = nullptr, *error = nullptr;
+            HRESULT res = D3D12SerializeRootSignature(&rootDesc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error);
+            if (SUCCEEDED(res)) {
+                res = device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&b.rootSignature));
+            }
+            if (blob) blob->Release();
+            if (error) error->Release();
+            if (SUCCEEDED(res)) {
+                D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+                pso.pRootSignature = b.rootSignature;
+                pso.VS = {presentVs.data(), presentVs.size()};
+                pso.PS = {presentPs.data(), presentPs.size()};
+                pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                pso.SampleMask = UINT_MAX;
+                pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+                pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+                pso.RasterizerState.DepthClipEnable = TRUE;
+                pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                pso.NumRenderTargets = 1;
+                pso.RTVFormats[0] = nativeFormat;
+                pso.SampleDesc.Count = 1;
+                res = device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&b.pipeline));
+            }
+            D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
+            D3D12_DESCRIPTOR_HEAP_DESC rtvDesc = {D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+            if (SUCCEEDED(res)) res = device->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&b.srvHeap));
+            if (SUCCEEDED(res)) res = device->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&b.rtvHeap));
+            if (SUCCEEDED(res)) res = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&b.allocator));
+            if (SUCCEEDED(res)) res = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, b.allocator, nullptr, IID_PPV_ARGS(&b.list));
+            if (SUCCEEDED(res)) res = b.list->Close();
+            if (SUCCEEDED(res)) res = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&b.fence));
+            fprintf(stderr, "present blit set up: HRESULT %08lX\n", res);
+            b.failed = FAILED(res);
+        }
+        PresentBlit &b = *presentBlit;
+        if (b.failed || presentSource == nullptr) {
+            return false;
+        }
+
+        // The last blit's list is done with before its allocator is reused.
+        if (b.fence->GetCompletedValue() < b.fenceValue) {
+            b.fence->SetEventOnCompletion(b.fenceValue, nullptr);
+        }
+
+        ID3D12Resource *buffer = nullptr;
+        if (FAILED(d3d->GetBuffer(d3d->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&buffer)))) {
+            return false;
+        }
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+        srv.Format = presentSourceFormat;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MipLevels = 1;
+        device->CreateShaderResourceView(presentSource, &srv, b.srvHeap->GetCPUDescriptorHandleForHeapStart());
+        device->CreateRenderTargetView(buffer, nullptr, b.rtvHeap->GetCPUDescriptorHandleForHeapStart());
+
+        b.allocator->Reset();
+        b.list->Reset(b.allocator, b.pipeline);
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Transition.pResource = buffer;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        b.list->ResourceBarrier(1, &barrier);
+        const D3D12_CPU_DESCRIPTOR_HANDLE rtv = b.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        b.list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        const D3D12_VIEWPORT viewport = {0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f};
+        const D3D12_RECT scissor = {0, 0, LONG(width), LONG(height)};
+        b.list->RSSetViewports(1, &viewport);
+        b.list->RSSetScissorRects(1, &scissor);
+        b.list->SetGraphicsRootSignature(b.rootSignature);
+        b.list->SetDescriptorHeaps(1, &b.srvHeap);
+        b.list->SetGraphicsRootDescriptorTable(0, b.srvHeap->GetGPUDescriptorHandleForHeapStart());
+        b.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        b.list->DrawInstanced(3, 1, 0, 0);
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        b.list->ResourceBarrier(1, &barrier);
+        b.list->Close();
+        ID3D12CommandList *lists[] = {b.list};
+        commandQueue->d3d->ExecuteCommandLists(1, lists);
+        commandQueue->d3d->Signal(b.fence, ++b.fenceValue);
+        buffer->Release();
+        return true;
     }
 #endif
 
@@ -3732,6 +3897,13 @@ namespace plume {
 
             ID3D12Device8 *deviceOption = nullptr;
             res = D3D12CreateDevice(adapterOption, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&deviceOption));
+            {
+                std::string aname = Utf16ToUtf8(adapterDesc.Description);
+                fprintf(stderr, "D3D12CreateDevice [%u] %s vidmem=%llu flags=0x%x HRESULT %08lX\n",
+                    adapterIndex - 1, aname.c_str(),
+                    (unsigned long long)adapterDesc.DedicatedVideoMemory,
+                    adapterDesc.Flags, res);
+            }
             if (FAILED(res)) {
                 adapterOption->Release();
                 continue;
@@ -3749,6 +3921,7 @@ namespace plume {
                 res = deviceOption->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &dataShaderModel, sizeof(dataShaderModel));
                 if (res != E_INVALIDARG) {
                     if (FAILED(res)) {
+                        fprintf(stderr, "SHADER_MODEL check failed HRESULT %08lX model %u\n", res, (unsigned)dataShaderModel.HighestShaderModel);
                         deviceOption->Release();
                         adapterOption->Release();
                         continue;

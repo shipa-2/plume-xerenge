@@ -102,11 +102,26 @@ namespace plume {
 #ifdef PLUME_UWP
     // The CoreWindow's size in physical pixels, for its swap chains (UWP).
     void D3D12SetCoreWindowSize(uint32_t width, uint32_t height);
+
+    // UWP (the Xbox One): a swap chain's back buffer takes neither a copy nor
+    // plume's own draws there, so Present itself draws `source` onto it - one
+    // full-screen triangle with these shaders (texture t0, sampler s1), on a root
+    // signature of its own. `source` must be in PIXEL_SHADER_RESOURCE by then.
+    void D3D12SetPresentShaders(const void *vs, size_t vsSize, const void *ps, size_t psSize);
+    void D3D12SetPresentSource(RenderSwapChain *swapChain, RenderTexture *source);
 #endif
 
     struct D3D12SwapChain : RenderSwapChain {
         RenderSwapChainDesc desc;
         IDXGISwapChain3 *d3d = nullptr;
+#ifdef PLUME_UWP
+        // Drawn onto the back buffer by present() (D3D12SetPresentSource).
+        ID3D12Resource *presentSource = nullptr;
+        DXGI_FORMAT presentSourceFormat = DXGI_FORMAT_UNKNOWN;
+        struct PresentBlit;
+        PresentBlit *presentBlit = nullptr;
+        bool drawPresentSource();
+#endif
         HANDLE waitableObject = 0;
         D3D12CommandQueue *commandQueue = nullptr;
         std::vector<D3D12Texture> textures;
