@@ -9,6 +9,7 @@
 
 #include <atomic>
 
+#include <unordered_map>
 #include <unordered_set>
 
 #include <dxgi1_5.h>
@@ -1434,6 +1435,46 @@ namespace plume {
         UINT flags = (!vsyncEnabled && tearingAllowed) ? DXGI_PRESENT_ALLOW_TEARING : 0;
 #ifdef PLUME_UWP
         drawPresentSource();
+        // PLUME_D3D12_DEBUG=1: the debug layer's messages into stderr, where
+        // there is no debugger to show them - polled here, the queue kept
+        // short. Errors and warnings, each kind a few times.
+        {
+            static const bool debugLayer = getenv("PLUME_D3D12_DEBUG") != nullptr;
+            static ID3D12InfoQueue *infoQueue = nullptr;
+            static bool asked = false;
+            static UINT printed = 0;
+            static std::unordered_map<int, UINT> seen;
+            if (debugLayer && !asked) {
+                asked = true;
+                if (FAILED(commandQueue->device->d3d->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
+                    infoQueue = nullptr;
+                }
+                fprintf(stderr, "D3D12 info queue: %s\n", infoQueue ? "available" : "not available");
+            }
+            if (infoQueue != nullptr) {
+                const UINT64 count = infoQueue->GetNumStoredMessages();
+                for (UINT64 i = 0; i < count && printed < 400; ++i) {
+                    SIZE_T length = 0;
+                    infoQueue->GetMessage(i, nullptr, &length);
+                    std::vector<uint8_t> storage(length);
+                    auto *message = reinterpret_cast<D3D12_MESSAGE *>(storage.data());
+                    if (FAILED(infoQueue->GetMessage(i, message, &length))) {
+                        continue;
+                    }
+                    if (message->Severity > D3D12_MESSAGE_SEVERITY_WARNING) {
+                        continue;
+                    }
+                    if (seen[int(message->ID)]++ >= 3) {
+                        continue;
+                    }
+                    fprintf(stderr, "D3D12 %s #%d: %s\n",
+                            message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR ? "ERROR" : "WARNING",
+                            int(message->ID), message->pDescription);
+                    ++printed;
+                }
+                infoQueue->ClearStoredMessages();
+            }
+        }
 #endif
         HRESULT res = d3d->Present(syncInterval, flags);
         if (res == DXGI_ERROR_WAS_STILL_DRAWING) {
@@ -1472,7 +1513,10 @@ namespace plume {
             textures[i].d3d = nullptr;
         }
 
-        HRESULT res = d3d->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, swapChainFlags);
+        // The size asked for, not 0 x 0: that takes the window's from DXGI, and on
+        // the Xbox One - a CoreWindow not shown yet - the buffers came out 1 x 1,
+        // the screen one stretched pixel while everything drawn assumed the full size.
+        HRESULT res = d3d->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, swapChainFlags);
         if (FAILED(res)) {
             fprintf(stderr, "ResizeBuffers failed with error code 0x%lX.\n", res);
             return false;
@@ -2533,9 +2577,15 @@ namespace plume {
 
         const D3D12_TEXTURE_COPY_LOCATION copyDstLocation = toD3D12(dstLocation);
         const D3D12_TEXTURE_COPY_LOCATION copySrcLocation = toD3D12(srcLocation);
-        setSamplePositions(dstLocation.texture);
+        // A copy into a buffer (a read-back) has no texture to take sample
+        // positions from.
+        if (dstLocation.texture != nullptr) {
+            setSamplePositions(dstLocation.texture);
+        }
         d3d->CopyTextureRegion(&copyDstLocation, dstX, dstY, dstZ, &copySrcLocation, (srcBox != nullptr) ? &copyBox : nullptr);
-        resetSamplePositions();
+        if (dstLocation.texture != nullptr) {
+            resetSamplePositions();
+        }
     }
 
     void D3D12CommandList::copyBuffer(const RenderBuffer *dstBuffer, const RenderBuffer *srcBuffer) {
